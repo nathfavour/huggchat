@@ -1,0 +1,125 @@
+{
+  "entities": {
+    "Credential": {
+      "title": "WebAuthn Credential Mapping",
+      "description": "Hardware WebAuthn registration mapping tying authenticators to user IDs and storing wrapping keys.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Credential ID"
+        },
+        "user_id": {
+          "type": "string",
+          "description": "Firebase Auth UID"
+        },
+        "public_key": {
+          "type": "string",
+          "description": "Base64 or Hex DER-encoded public key"
+        },
+        "wrapped_mek": {
+          "type": "string",
+          "description": "Hex representation of AES-GCM encrypted Master Encryption Key (MEK)"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["id", "user_id", "public_key", "wrapped_mek", "created_at"]
+    },
+    "Profile": {
+      "title": "User Public Profile",
+      "description": "Public account records for discoverability and secure X25519 key agreements.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "User UID (matches document ID)"
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique username"
+        },
+        "identity_pubkey": {
+          "type": "string",
+          "description": "Hex string representing user public identity coordinate (X25519)"
+        }
+      },
+      "required": ["id", "username", "identity_pubkey"]
+    },
+    "Chat": {
+      "title": "Chat Session Thread",
+      "description": "Data record of the shared direct message mapping or group threads.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Chat UUID or compound ID (matches document ID)"
+        },
+        "is_group": {
+          "type": "boolean",
+          "description": "Flag indicating if this chat is a multi-user group chat"
+        },
+        "participants": {
+          "type": "array",
+          "description": "List of user IDs participating in the conversation"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Session creation date"
+        }
+      },
+      "required": ["id", "is_group", "participants", "created_at"]
+    },
+    "Message": {
+      "title": "Encrypted Message Frame",
+      "description": "Encrypted message payload including payload types and public cryptographic keys.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Message ID (matches document ID)"
+        },
+        "sender_id": {
+          "type": "string",
+          "description": "ID of sending user profile"
+        },
+        "payload": {
+          "type": "string",
+          "description": "Encrypted message body payload prefixed by binary flags"
+        },
+        "ephemeral_pubkey": {
+          "type": "string",
+          "description": "Ephemeral sender public coordinate used in DH key rotation"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Message release date"
+        }
+      },
+      "required": ["id", "sender_id", "payload", "created_at"]
+    }
+  },
+  "firestore": {
+    "/credentials/{credential_id}": {
+      "schema": { "$ref": "#/entities/Credential" },
+      "description": "Collection storing credential mapping registers used to verify auth attempts"
+    },
+    "/profiles/{user_id}": {
+      "schema": { "$ref": "#/entities/Profile" },
+      "description": "User-facing profiles for search verification"
+    },
+    "/chats/{chat_id}": {
+      "schema": { "$ref": "#/entities/Chat" },
+      "description": "Active chatting rooms mapped over Firestore"
+    },
+    "/chats/{chat_id}/messages/{message_id}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "E2EE encrypted communication envelopes for chats"
+    }
+  }
+}

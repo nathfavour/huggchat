@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Path Variable Hardening helper
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. WebAuthn credentials - PRIVATE!
+    // Administrative scopes only. Security rules strictly restrict read/write
+    // permissions of the client from accessing credentials directly.
+    match /credentials/{credential_id} {
+      allow read, write: if false;
+    }
+
+    // 2. Profiles (Users directory)
+    match /profiles/{user_id} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() 
+        && isValidId(user_id) 
+        && user_id == request.auth.uid 
+        && isValidProfile(incoming());
+    }
+
+    function isValidProfile(data) {
+      return data.id is string 
+        && data.id == request.auth.uid
+        && data.username is string 
+        && data.username.size() >= 3 
+        && data.username.size() <= 32
+        && data.username.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.identity_pubkey is string 
+        && data.identity_pubkey.size() == 64;
+    }
+
+    // 3. Chat sessions
+    match /chats/{chat_id} {
+      allow create: if isSignedIn() 
+        && isValidId(chat_id) 
+        && isValidChat(incoming()) 
+        && request.auth.uid in incoming().participants;
+        
+      allow read: if isSignedIn() 
+        && isValidId(chat_id)
+        && request.auth.uid in existing().participants;
+        
+      allow update: if isSignedIn() 
+        && isValidId(chat_id) 
+        && request.auth.uid in existing().participants
+        && isValidChat(incoming()) 
+        && request.auth.uid in incoming().participants
+        && incoming().diff(existing()).affectedKeys().hasOnly(['participants']);
+    }
+
+    function isValidChat(data) {
+      return data.id is string 
+        && data.id.size() <= 128
+        && data.is_group is bool 
+        && data.participants is list 
+        && data.participants.size() >= 2 
+        && data.participants.size() <= 100
+        && data.participants[0] is string
+        && data.created_at == request.time;
+    }
+
+    // 4. Chat Messages (E2EE payload envelopes)
+    match /chats/{chat_id}/messages/{message_id} {
+      // Relational Sync Rule: can only read/write messages if member of the parent chat
+      allow read, list: if isSignedIn() 
+        && isValidId(chat_id)
+        && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chat_id)).data.participants);
+        
+      allow create: if isSignedIn() 
+        && isValidId(chat_id)
+        && isValidId(message_id)
+        && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chat_id)).data.participants)
+        && isValidMessage(incoming());
+        
+      // Messages are immutable in huggchat to prevent history tampering and preserve ratchet state integrity
+      allow update, delete: if false;
+    }
+
+    function isValidMessage(data) {
+      return data.id is string 
+        && data.id.size() <= 128
+        && data.sender_id is string 
+        && data.sender_id == request.auth.uid
+        && data.payload is string 
+        && data.payload.size() <= 1000000
+        && data.created_at == request.time
+        && (!('ephemeral_pubkey' in data) || (data.ephemeral_pubkey is string && data.ephemeral_pubkey.size() == 64));
+    }
+  }
+}
