@@ -7,6 +7,11 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Connection testing endpoint
+    match /test/connection {
+      allow read: if true;
+    }
+
     // Path Variable Hardening helper
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
@@ -25,21 +30,19 @@ service cloud.firestore {
     }
 
     // 1. WebAuthn credentials
-    // Allow unauthenticated fetch by ID to fetch public WebAuthn coordinates/wrapped_mek during login.
-    // List queries are strictly forbidden.
+    // Allow unauthenticated fetch by ID and list query to fetch public WebAuthn coordinates/wrapped_mek during login.
     match /credentials/{credential_id} {
       allow get: if true;
-      allow list: if false;
+      allow list: if true;
       allow create: if true; // Registration creates credential document
       allow update: if isSignedIn() && resource.data.user_id == request.auth.uid;
     }
 
     // 2. Profiles (Users directory)
-    // Public get allowed to fetch other users' identifiers/identity_pubkey.
-    // List queries only allowed for signed-in users (searching for peers).
+    // Public get and list allowed to search users and check registry availability before authentication.
     match /profiles/{user_id} {
       allow get: if true;
-      allow list: if isSignedIn();
+      allow list: if true;
       allow create: if true; // Registration creates profile document
       allow update: if isSignedIn() 
         && isValidId(user_id) 
