@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { signInWithCustomToken, signOut, onAuthStateChanged } from "firebase/auth";
+import { signInWithCustomToken, signOut, onAuthStateChanged, signInWithEmailAndPassword } from "firebase/auth";
 import { doc, getDoc, collection, query, where, getDocs, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import { PasskeyAuth } from "./components/PasskeyAuth";
@@ -83,10 +83,10 @@ export default function App() {
     customToken: string
   ) => {
     setUnwrappedMek(mekBytes);
-    // Authenticate with Firebase securely
-    signInWithCustomToken(auth, customToken).catch((err) => {
-      console.error("Firebase custom token login failed:", err);
-      setGlobalError("Firebase authentication synch failed. Refresh biometrics.");
+    setCurrentUserProfile({
+      id: uid,
+      username: username,
+      identity_pubkey: "",
     });
   };
 
@@ -167,40 +167,23 @@ export default function App() {
       // Store fresh private coordinates local storage
       localStorage.setItem(`huggchat_priv_${matchingProfile.id}`, cipherKeyPair.privateKeyJwk);
 
-      // Save new coordinates to server
+      // 4. Derive high-entropy deterministic security password from matching / sovereign Master Encryption Key (MEK)
+      const passwordSource = new TextEncoder().encode(bufToHex(decryptedMek) + "huggchat-passkey-v1");
+      const hashBuffer = await window.crypto.subtle.digest("SHA-256", passwordSource);
+      const firebasePassword = bufToHex(new Uint8Array(hashBuffer));
+
+      // 5. Authenticate directly on Firebase securely via standard Email/Password
+      const userEmail = `${matchingProfile.username}@huggchat.internal`;
+      await signInWithEmailAndPassword(auth, userEmail, firebasePassword);
+
+      // Save new coordinates to server using now authenticated session
       await setDoc(doc(db, "profiles", matchingProfile.id), {
         id: matchingProfile.id,
         username: matchingProfile.username,
         identity_pubkey: cipherKeyPair.publicKeyHex, // Note: Updates their search registry
       });
 
-      // 4. Authenticate of Firebase securely via custom token
-      const response = await fetch("/api/auth/register-options", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: matchingProfile.username }),
-      });
-
-      if (!response.ok) {
-         throw new Error("Sovereign passkey re-initialization failed");
-      }
-
-      const { uid } = await response.json();
-      const resVerify = await fetch("/api/auth/verify-registration", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          uid,
-          response: { id: "recovered", rawId: "recovered", type: "public-key", response: {} }, // Bypass verification on recovered flow
-          wrappedMek: matchingBackup.wrapped_mek,
-          identityPubkey: cipherKeyPair.publicKeyHex,
-        }),
-      });
-
-      const verifyData = await resVerify.json();
-
       setUnwrappedMek(decryptedMek);
-      await signInWithCustomToken(auth, verifyData.customToken);
 
       // Reset recovery pane
       setIsRecovering(false);

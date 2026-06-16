@@ -1,9 +1,6 @@
 import express from "express";
 import path from "path";
 import crypto from "crypto";
-import * as admin from "firebase-admin";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { getAuth } from "firebase-admin/auth";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -11,16 +8,6 @@ import {
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
 import { createServer as createViteServer } from "vite";
-import firebaseConfig from "./firebase-applet-config.json";
-
-// Initialize Firebase Admin with Firestore Database ID
-admin.initializeApp({
-  projectId: firebaseConfig.projectId,
-});
-
-const db = getFirestore(firebaseConfig.firestoreDatabaseId);
-
-const auth = getAuth();
 
 const app = express();
 const PORT = 3000;
@@ -31,19 +18,9 @@ app.use(express.json());
 const challengesMap = new Map<string, { challenge: string; username?: string }>();
 
 // 1. Check Username Availability
+// Handled directly client-side via Firestore query, but endpoint kept for API compatibility.
 app.get("/api/auth/username-check/:username", async (req, res) => {
-  try {
-    const { username } = req.params;
-    if (!username || typeof username !== "string") {
-      return res.status(400).json({ error: "Invalid username" });
-    }
-    const cleanUsername = username.trim().toLowerCase();
-    const query = await db.collection("profiles").where("username", "==", cleanUsername).limit(1).get();
-    return res.json({ available: query.empty });
-  } catch (err: any) {
-    console.error("Error in username availability check:", err);
-    return res.status(500).json({ error: err.message });
-  }
+  return res.json({ available: true });
 });
 
 // 2. Registration Options Flow
@@ -54,12 +31,6 @@ app.post("/api/auth/register-options", async (req, res) => {
       return res.status(400).json({ error: "Username is required" });
     }
     const cleanUsername = username.trim().toLowerCase();
-    
-    // Fast verification
-    const query = await db.collection("profiles").where("username", "==", cleanUsername).limit(1).get();
-    if (!query.empty) {
-      return res.status(400).json({ error: "Username is already registered" });
-    }
 
     const uid = crypto.randomUUID();
     const rpID = req.hostname === "localhost" || req.hostname === "127.0.0.1" ? req.hostname : req.hostname;
@@ -105,8 +76,8 @@ app.post("/api/auth/register-options", async (req, res) => {
 // 3. Verify Registration Flow
 app.post("/api/auth/verify-registration", async (req, res) => {
   try {
-    const { uid, response: credentialResponse, wrappedMek, identityPubkey } = req.body;
-    if (!uid || !credentialResponse || !wrappedMek || !identityPubkey) {
+    const { uid, response: credentialResponse } = req.body;
+    if (!uid || !credentialResponse) {
       return res.status(400).json({ error: "Missing registration payload" });
     }
 
@@ -134,47 +105,13 @@ app.post("/api/auth/verify-registration", async (req, res) => {
     const credIdBase64 = Buffer.from(credentialID).toString("base64url");
     const pubKeyBase64 = Buffer.from(credentialPublicKey).toString("base64");
 
-    // Provision User Record securely
-    let userRecord;
-    try {
-      userRecord = await auth.createUser({
-        uid: uid,
-        displayName: stored.username,
-      });
-    } catch (err: any) {
-      if (err.code === "auth/uid-already-exists") {
-        userRecord = await auth.getUser(uid);
-      } else {
-        throw err;
-      }
-    }
-
-    // Write Secure Profiles and Credentials bypass client rules using Firebase Admin SDK with server privilege limits.
-    const batch = db.batch();
-
-    const credRef = db.collection("credentials").doc(credIdBase64);
-    batch.set(credRef, {
-      id: credIdBase64,
-      user_id: uid,
-      public_key: pubKeyBase64,
-      wrapped_mek: wrappedMek,
-      created_at: FieldValue.serverTimestamp(),
-    });
-
-    const profileRef = db.collection("profiles").doc(uid);
-    batch.set(profileRef, {
-      id: uid,
-      username: stored.username,
-      identity_pubkey: identityPubkey,
-    });
-
-    await batch.commit();
     challengesMap.delete(uid);
 
-    // Mint short-lived Firebase Auth Custom Token
-    const customToken = await auth.createCustomToken(uid);
-
-    return res.json({ success: true, customToken });
+    return res.json({ 
+      success: true, 
+      credId: credIdBase64, 
+      pubKey: pubKeyBase64 
+    });
   } catch (err: any) {
     console.error("Error verifying registration:", err);
     return res.status(500).json({ error: err.message });
@@ -184,31 +121,9 @@ app.post("/api/auth/verify-registration", async (req, res) => {
 // 4. Login Options Flow
 app.post("/api/auth/login-options", async (req, res) => {
   try {
-    const { username } = req.body;
-    let allowCredentials = undefined;
-
-    if (username && typeof username === "string") {
-      const cleanUsername = username.trim().toLowerCase();
-      const profileQuery = await db.collection("profiles").where("username", "==", cleanUsername).limit(1).get();
-      
-      if (!profileQuery.empty) {
-        const uid = profileQuery.docs[0].id;
-        const credsQuery = await db.collection("credentials").where("user_id", "==", uid).get();
-        if (!credsQuery.empty) {
-          allowCredentials = credsQuery.docs.map((doc) => ({
-            id: Buffer.from(doc.id, "base64url"),
-            type: "public-key" as const,
-          }));
-        }
-      } else {
-        return res.status(404).json({ error: `Username '${username}' not found.` });
-      }
-    }
-
     const rpID = req.hostname;
     const options = await generateAuthenticationOptions({
       rpID,
-      allowCredentials,
       userVerification: "preferred",
     });
 
@@ -236,22 +151,13 @@ app.post("/api/auth/login-options", async (req, res) => {
   }
 });
 
-// 5. Verify Authentication Assertions
+// 5. Verify Authentication Assertions (Optional, kept for API matching)
 app.post("/api/auth/verify-authentication", async (req, res) => {
   try {
-    const { response: assertionResponse } = req.body;
-    if (!assertionResponse || !assertionResponse.id) {
+    const { response: assertionResponse, publicKey } = req.body;
+    if (!assertionResponse || !assertionResponse.id || !publicKey) {
       return res.status(400).json({ error: "Missing authentication payload parameters" });
     }
-
-    const credIdBase64 = assertionResponse.id;
-    const credDoc = await db.collection("credentials").doc(credIdBase64).get();
-    if (!credDoc.exists) {
-      return res.status(404).json({ error: "Hardware passkey not registered on this service" });
-    }
-
-    const credData = credDoc.data()!;
-    const { user_id, public_key, wrapped_mek } = credData;
 
     // Decode ClientData challenge
     const clientDataJSON = JSON.parse(Buffer.from(assertionResponse.response.clientDataJSON, "base64").toString());
@@ -271,8 +177,8 @@ app.post("/api/auth/verify-authentication", async (req, res) => {
       expectedOrigin: origin,
       expectedRPID: rpID,
       credential: {
-        id: credIdBase64,
-        publicKey: Buffer.from(public_key, "base64"),
+        id: assertionResponse.id,
+        publicKey: Buffer.from(publicKey, "base64"),
         counter: 0,
       },
       requireUserVerification: false,
@@ -284,13 +190,8 @@ app.post("/api/auth/verify-authentication", async (req, res) => {
 
     challengesMap.delete(clientChallenge);
 
-    // Clean Session custom token
-    const customToken = await auth.createCustomToken(user_id);
-
     return res.json({
       success: true,
-      customToken,
-      wrappedMek: wrapped_mek,
     });
   } catch (err: any) {
     console.error("Error verifying authentication:", err);

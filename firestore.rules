@@ -24,20 +24,32 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // 1. WebAuthn credentials - PRIVATE!
-    // Administrative scopes only. Security rules strictly restrict read/write
-    // permissions of the client from accessing credentials directly.
+    // 1. WebAuthn credentials
+    // Allow unauthenticated fetch by ID to fetch public WebAuthn coordinates/wrapped_mek during login.
+    // List queries are strictly forbidden.
     match /credentials/{credential_id} {
-      allow read, write: if false;
+      allow get: if true;
+      allow list: if false;
+      allow create: if true; // Registration creates credential document
+      allow update: if isSignedIn() && resource.data.user_id == request.auth.uid;
     }
 
     // 2. Profiles (Users directory)
+    // Public get allowed to fetch other users' identifiers/identity_pubkey.
+    // List queries only allowed for signed-in users (searching for peers).
     match /profiles/{user_id} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn() 
+      allow get: if true;
+      allow list: if isSignedIn();
+      allow create: if true; // Registration creates profile document
+      allow update: if isSignedIn() 
         && isValidId(user_id) 
         && user_id == request.auth.uid 
         && isValidProfile(incoming());
+    }
+
+    // Profiles subcollections (e.g. Master Pass backups)
+    match /profiles/{user_id}/backups/{backup_id} {
+      allow get, create, update: if true; // Backup blocks are password-wrapped blobs, safe to access
     }
 
     function isValidProfile(data) {

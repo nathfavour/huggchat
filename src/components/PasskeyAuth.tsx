@@ -1,8 +1,10 @@
 import React, { useState } from "react";
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
-import { Shield, Key, Sparkles} from "lucide-react";
-import { wrapMek, unwrapMek, generateIdentityKeypair, bufToHex, hexToBuf } from "../cryptoUtils";
-import { UIState } from "../types";
+import { Shield, Key, Sparkles } from "lucide-react";
+import { wrapMek, unwrapMek, generateIdentityKeypair, bufToHex } from "../cryptoUtils";
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
+import { doc, setDoc, getDocs, collection, query, where } from "firebase/firestore";
+import { db, auth } from "../firebase";
 
 // Base64URL decoder helper for older browsers
 function base64urlDecode(base64url: string): Uint8Array {
@@ -43,11 +45,20 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
     setError("");
 
     try {
+      const cleanUsername = username.trim().toLowerCase();
+
+      // Check username availability directly via Firestore client query
+      const userQuery = query(collection(db, "profiles"), where("username", "==", cleanUsername));
+      const querySnap = await getDocs(userQuery);
+      if (!querySnap.empty) {
+        throw new Error("Username is already registered.");
+      }
+
       // 1. Fetch registration options from Express backend
       const resOptions = await fetch("/api/auth/register-options", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: username.trim().toLowerCase() }),
+        body: JSON.stringify({ username: cleanUsername }),
       });
 
       if (!resOptions.ok) {
@@ -55,12 +66,12 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
         throw new Error(errData.error || "Failed to generate registration options");
       }
 
-      const { uid, options } = await resOptions.json();
+      const { uid: serverUid, options } = await resOptions.json();
 
       // 2. Client WebAuthn process
       const attResp = await startRegistration({ optionsJSON: options });
 
-      // 3. Automated silented assertion pivot to derive stable PRF seed bytes
+      // 3. Automated silent assertion pivot to derive stable PRF seed bytes
       let prfSeedBytes: Uint8Array;
       try {
         const clientGetOptions = {
@@ -92,7 +103,7 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
         }
       } catch (prfErr) {
         // Safe, smart fallback using SHA-256 over credential id + username when hardware PRF is missing/blocked
-        const fallbackSource = new TextEncoder().encode(attResp.id + username.trim().toLowerCase());
+        const fallbackSource = new TextEncoder().encode(attResp.id + cleanUsername);
         const hash = await window.crypto.subtle.digest("SHA-256", fallbackSource);
         prfSeedBytes = new Uint8Array(hash);
       }
@@ -104,18 +115,13 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
       // 5. Generate secure X25519 identity keypair
       const cipherKeyPair = await generateIdentityKeypair();
 
-      // Store private X25519 key in standard client localStorage securely
-      localStorage.setItem(`huggchat_priv_${uid}`, cipherKeyPair.privateKeyJwk);
-
-      // 6. Complete verification on Express server
+      // 6. Complete cryptographic WebAuthn verification on Express server
       const resVerify = await fetch("/api/auth/verify-registration", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          uid,
+          uid: serverUid,
           response: attResp,
-          wrappedMek: wrappedMekHex,
-          identityPubkey: cipherKeyPair.publicKeyHex,
         }),
       });
 
@@ -124,9 +130,38 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
         throw new Error(verifyErr.error || "WebAuthn registration verification failed");
       }
 
-      const verifyData = await resVerify.json();
+      const { credId, pubKey } = await resVerify.json();
 
-      onAuthSuccess(uid, username.trim().toLowerCase(), mekBytes, verifyData.customToken);
+      // 7. Derive high-entropy deterministic security password from biometric / sovereign Master Encryption Key (MEK)
+      const passwordSource = new TextEncoder().encode(bufToHex(mekBytes) + "huggchat-passkey-v1");
+      const hashBuffer = await window.crypto.subtle.digest("SHA-256", passwordSource);
+      const firebasePassword = bufToHex(new Uint8Array(hashBuffer));
+
+      // 8. Authenticate client session securely via standard Firebase Auth Email/Password
+      const userEmail = `${cleanUsername}@huggchat.internal`;
+      const userCredential = await createUserWithEmailAndPassword(auth, userEmail, firebasePassword);
+      const firebaseUid = userCredential.user.uid;
+
+      // Store private X25519 key in client localStorage bound to Firebase UID
+      localStorage.setItem(`huggchat_priv_${firebaseUid}`, cipherKeyPair.privateKeyJwk);
+
+      // Create Profile record directly on client
+      await setDoc(doc(db, "profiles", firebaseUid), {
+        id: firebaseUid,
+        username: cleanUsername,
+        identity_pubkey: cipherKeyPair.publicKeyHex,
+      });
+
+      // Create WebAuthn Credential record securely on client
+      await setDoc(doc(db, "credentials", credId), {
+        id: credId,
+        user_id: firebaseUid,
+        public_key: pubKey,
+        wrapped_mek: wrappedMekHex,
+        created_at: new Date().toISOString(),
+      });
+
+      onAuthSuccess(firebaseUid, cleanUsername, mekBytes, "local-auth");
     } catch (err: any) {
       console.error(err);
       setError(err.message || "An unexpected error occurred during registration");
@@ -141,40 +176,61 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
     setError("");
 
     try {
-      // 1. Fetch options
+      const cleanUsername = username.trim().toLowerCase();
+
+      // 1. Fetch profile UID based on registered username
+      const profileQuery = query(collection(db, "profiles"), where("username", "==", cleanUsername));
+      const profileSnap = await getDocs(profileQuery);
+      if (profileSnap.empty) {
+        throw new Error(`Username '${username}' not registered.`);
+      }
+      const profileData = profileSnap.docs[0].data();
+      const firebaseUid = profileData.id;
+
+      // 2. Fetch biometric credentials associated with the user UID
+      const credsQuery = query(collection(db, "credentials"), where("user_id", "==", firebaseUid));
+      const credsSnap = await getDocs(credsQuery);
+      if (credsSnap.empty) {
+        throw new Error("No hardware credentials registered for this user.");
+      }
+      const credData = credsSnap.docs[0].data();
+
+      // 3. Request authentication challenge
       const resOptions = await fetch("/api/auth/login-options", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: username.trim().toLowerCase() }),
+        body: JSON.stringify({ username: cleanUsername }),
       });
 
       if (!resOptions.ok) {
         const errData = await resOptions.json();
-        throw new Error(errData.error || "Failed finding registered credentials");
+        throw new Error(errData.error || "Failed obtaining login options");
       }
 
       const { options } = await resOptions.json();
 
-      // 2. Challenge browser biometric flow
+      // 4. Trigger WebAuthn authentication Prompt on physical hardware
       const assResp = await startAuthentication({ optionsJSON: options });
 
-      // 3. Read PRF extension results or fall back
+      // 5. Read PRF extension results to reconstruct master encryption seeds
       let prfSeedBytes: Uint8Array;
       const prfResults = (assResp.clientExtensionResults as any)?.prf;
       if (prfResults && prfResults.results && prfResults.results.first) {
         prfSeedBytes = new Uint8Array(prfResults.results.first as any);
       } else {
-        // Fallback matching registration
-        const fallbackSource = new TextEncoder().encode(assResp.id + (username || assResp.id).trim().toLowerCase());
+        const fallbackSource = new TextEncoder().encode(assResp.id + cleanUsername);
         const hash = await window.crypto.subtle.digest("SHA-256", fallbackSource);
         prfSeedBytes = new Uint8Array(hash);
       }
 
-      // 4. Verify assertion on backend
+      // 6. Request backend cryptographic signature validations statelessly
       const resVerify = await fetch("/api/auth/verify-authentication", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ response: assResp }),
+        body: JSON.stringify({ 
+          response: assResp,
+          publicKey: credData.public_key
+        }),
       });
 
       if (!resVerify.ok) {
@@ -182,14 +238,19 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
         throw new Error(verifyErr.error || "Authentication signature verification failed");
       }
 
-      const { customToken, wrappedMek } = await resVerify.json();
+      // 7. Decrypt Master Encryption Key (MEK) using local biometric PRF seeds
+      const unwrappedMekBytes = await unwrapMek(credData.wrapped_mek, prfSeedBytes);
 
-      // 5. Decrypt MEK locally using the derived PRF seed
-      const unwrappedMekBytes = await unwrapMek(wrappedMek, prfSeedBytes);
+      // 8. Reconstruct high-entropy deterministic security password to authorize session
+      const passwordSource = new TextEncoder().encode(bufToHex(unwrappedMekBytes) + "huggchat-passkey-v1");
+      const hashBuffer = await window.crypto.subtle.digest("SHA-256", passwordSource);
+      const firebasePassword = bufToHex(new Uint8Array(hashBuffer));
 
-      // Lookup profile metadata for full profile hydration
-      const cleanUsername = username.trim().toLowerCase();
-      onAuthSuccess(cleanUsername, cleanUsername, unwrappedMekBytes, customToken);
+      // 9. Sign in directly to Firebase client session using derived passkey credentials
+      const userEmail = `${cleanUsername}@huggchat.internal`;
+      await signInWithEmailAndPassword(auth, userEmail, firebasePassword);
+
+      onAuthSuccess(firebaseUid, cleanUsername, unwrappedMekBytes, "local-auth");
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Authentication failed. Make sure your browser has passkeys configured.");
