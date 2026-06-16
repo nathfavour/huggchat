@@ -52,11 +52,7 @@ app.post("/api/auth/register-options", async (req, res) => {
     // Request the PRF extension specifically
     (options.extensions as any) = {
       ...options.extensions,
-      prf: {
-        eval: {
-          first: Buffer.from("huggchat-mek-salt-v1"),
-        },
-      },
+      prf: {},
     };
 
     challengesMap.set(uid, { challenge: options.challenge, username: cleanUsername });
@@ -132,7 +128,7 @@ app.post("/api/auth/login-options", async (req, res) => {
       ...options.extensions,
       prf: {
         eval: {
-          first: Buffer.from("huggchat-mek-salt-v1"),
+          first: Buffer.from("huggchat-mek-salt-v1").toString("base64url"),
         },
       },
     };
