@@ -1,6 +1,6 @@
 {
   "name": "huggchat",
   "description": "A sovereign, zero-knowledge, end-to-end encrypted messaging application with passkey-first identity and local voice notes.",
-  "requestFramePermissions": ["microphone"],
+  "requestFramePermissions": ["microphone", "publickey-credentials-create", "publickey-credentials-get"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

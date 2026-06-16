@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
-import { Shield, Key, Sparkles } from "lucide-react";
+import { Shield, Key, Sparkles, ShieldAlert, ExternalLink } from "lucide-react";
 import { wrapMek, unwrapMek, generateIdentityKeypair, bufToHex } from "../cryptoUtils";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
 import { doc, setDoc, getDocs, collection, query, where } from "firebase/firestore";
@@ -259,6 +259,8 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
     }
   };
 
+  const isIframe = typeof window !== "undefined" && window.self !== window.top;
+
   return (
     <div className="w-full max-w-md mx-auto bg-[#141211] border border-[#23211F] rounded-lg p-8 shadow-[2px_2px_0px_#23211F,4px_4px_0px_#1E1B19,6px_6px_0px_#0A0908] select-none transition-all duration-300">
       <div className="flex flex-col items-center mb-8">
@@ -272,6 +274,28 @@ export const PasskeyAuth: React.FC<PasskeyAuthProps> = ({ onAuthSuccess, setErro
           <Sparkles className="w-3.5 h-3.5" /> End-to-End Encrypted
         </p>
       </div>
+
+      {isIframe && (
+        <div className="mb-6 p-4 bg-[#0A0908] border border-[#23211F] rounded-lg flex flex-col gap-3">
+          <div className="flex items-center gap-2 text-[#C19A6B]">
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <span className="font-sans text-xs font-semibold uppercase tracking-wider">
+              Sandbox Security Alert
+            </span>
+          </div>
+          <p className="font-sans text-xs text-[#8A7E73] leading-relaxed">
+            Browsers restrict biometric passkeys/WebAuthn within sandboxed preview frames. Open this application in a new tab to create or assert your passkey.
+          </p>
+          <a
+            href={window.location.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full mt-1 border border-[#23211F] bg-[#141211] hover:bg-[#1E1B19] text-[#EAE2D8] hover:text-white transition-all duration-200 font-mono text-[11px] uppercase tracking-wider py-2 rounded flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            Open in New Tab <ExternalLink className="w-3.5 h-3.5" />
+          </a>
+        </div>
+      )}
 
       <div className="flex bg-[#0A0908] p-1 rounded border border-[#23211F] mb-6">
         <button
