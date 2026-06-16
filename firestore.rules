@@ -73,8 +73,11 @@ service cloud.firestore {
         && isValidChat(incoming()) 
         && request.auth.uid in incoming().participants;
         
-      allow read: if isSignedIn() 
+      allow get: if isSignedIn() 
         && isValidId(chat_id)
+        && request.auth.uid in existing().participants;
+
+      allow list: if isSignedIn() 
         && request.auth.uid in existing().participants;
         
       allow update: if isSignedIn() 
@@ -99,7 +102,12 @@ service cloud.firestore {
     // 4. Chat Messages (E2EE payload envelopes)
     match /chats/{chat_id}/messages/{message_id} {
       // Relational Sync Rule: can only read/write messages if member of the parent chat
-      allow read, list: if isSignedIn() 
+      allow get: if isSignedIn() 
+        && isValidId(chat_id)
+        && isValidId(message_id)
+        && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chat_id)).data.participants);
+
+      allow list: if isSignedIn() 
         && isValidId(chat_id)
         && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chat_id)).data.participants);
         
